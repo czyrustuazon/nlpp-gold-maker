@@ -1,0 +1,258 @@
+# Bake EngPatcher → publish bake_img.bin + romfs_overlay.zip on THIS repo's Releases.
+#
+# Primary trigger: EngPatcher push to main (request-gold-release.yml → repository_dispatch).
+# Also: workflow_dispatch on this repo (repo owner only).
+#
+# Target: headless Ubuntu x86_64 self-hosted runner.
+# Runner env: NLPP_VANILLA_IMG, NLPP_VANILLA_CODE, NLPP_VANILLA_TRB,
+#   NLPP_VANILLA_RESIDENT_TRB, NLPP_PACK_CACHE; optional NLPP_PACK_WORKERS.
+# Private EngPatcher: secret ENGPATCHER_CHECKOUT_TOKEN (contents:read).
+#
+# Consumers (EngPatcher tree):
+#   python tools/fetch_release_bake.py --repo OWNER/THIS_REPO --tag gold
+
+name: Release gold bake
+
+on:
+  repository_dispatch:
+    types: [engpatcher-release]
+  workflow_dispatch:
+    inputs:
+      skip_pack:
+        description: "Skip PNG pack; refresh TRB/deploys using prior Release bake"
+        type: boolean
+        default: false
+      tag_name:
+        description: "Release tag (default: gold)"
+        type: string
+        required: false
+        default: "gold"
+      workers:
+        description: "pack_images --workers (blank = NLPP_PACK_WORKERS or 2)"
+        type: string
+        required: false
+        default: ""
+      engpatcher_ref:
+        description: "EngPatcher ref/SHA to build"
+        type: string
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+# One bake at a time on the single self-hosted box; newest push wins the queue.
+concurrency:
+  group: gold-bake
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: self-hosted
+    # repository_dispatch from EngPatcher always runs; manual bake only for owner.
+    if: github.event_name != 'workflow_dispatch' || github.actor == github.repository_owner
+    timeout-minutes: 1200
+    env:
+      NLPP_PACK_CACHE: ${{ vars.NLPP_PACK_CACHE || '/opt/nlpp/cache/img_pack' }}
+      ENGPATCHER_REPO: ${{ vars.NLPP_ENGPATCHER_REPO || format('{0}/NewLovePlusPlusEngPatcher', github.repository_owner) }}
+
+    steps:
+      # No actions/* — repo is pre-checked out to GITHUB_WORKSPACE;
+      # clone EngPatcher with git below.
+      - name: Resolve tag / EngPatcher ref / pack flags
+        id: meta
+        env:
+          EVENT: ${{ github.event_name }}
+          P_TAG: ${{ github.event.client_payload.tag }}
+          P_REF: ${{ github.event.client_payload.engpatcher_ref }}
+          P_SKIP: ${{ github.event.client_payload.skip_pack }}
+          I_TAG: ${{ inputs.tag_name }}
+          I_REF: ${{ inputs.engpatcher_ref }}
+          I_SKIP: ${{ inputs.skip_pack }}
+          I_WORKERS: ${{ inputs.workers }}
+          V_REF: ${{ vars.NLPP_ENGPATCHER_REF }}
+          V_FORCE_SKIP: ${{ vars.FORCE_SKIP_PACK }}
+          V_WORKERS: ${{ vars.NLPP_PACK_WORKERS }}
+        run: |
+          set -euo pipefail
+          SKIP=false
+
+          if [ "$EVENT" = "repository_dispatch" ]; then
+            TAG="$P_TAG"
+            REF="$P_REF"
+            [ "$P_SKIP" = "true" ] && SKIP=true
+          else
+            TAG="$I_TAG"
+            REF="$I_REF"
+            [ "$I_SKIP" = "true" ] && SKIP=true
+          fi
+
+          TAG="${TAG:-gold}"
+          REF="${REF:-${V_REF:-main}}"
+          [ "$V_FORCE_SKIP" = "true" ] && SKIP=true
+
+          if [ "$EVENT" = "workflow_dispatch" ] && [ -n "$I_WORKERS" ]; then
+            WORKERS="$I_WORKERS"
+          else
+            WORKERS="${V_WORKERS:-2}"
+          fi
+
+          case "$TAG" in
+            gold|v*) ;;
+            *)
+              echo "Release tag must be 'gold' or look like vX.Y.Z (got: '$TAG')" >&2
+              exit 1
+              ;;
+          esac
+          case "$WORKERS" in
+            ''|*[!0-9]*)
+              echo "workers must be a positive integer (got: '$WORKERS')" >&2
+              exit 1
+              ;;
+          esac
+
+          {
+            echo "tag=$TAG"
+            echo "engpatcher_ref=$REF"
+            echo "skip_pack=$SKIP"
+            echo "workers=$WORKERS"
+          } >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG engpatcher_ref=$REF skip_pack=$SKIP workers=$WORKERS"
+
+      - name: Clone EngPatcher
+        env:
+          GH_TOKEN: ${{ secrets.ENGPATCHER_CHECKOUT_TOKEN || github.token }}
+          ENGPATCHER_REF: ${{ steps.meta.outputs.engpatcher_ref }}
+        run: |
+          set -euo pipefail
+          rm -rf engpatcher
+          git clone --filter=blob:none --no-checkout \
+            "https://x-access-token:${GH_TOKEN}@github.com/${ENGPATCHER_REPO}.git" \
+            engpatcher
+          git -C engpatcher fetch --depth 1 origin "${ENGPATCHER_REF}"
+          git -C engpatcher checkout FETCH_HEAD
+          git -C engpatcher rev-parse HEAD
+
+      # Ubuntu 23.04+ system Python refuses `pip install` (PEP 668), so use a venv.
+      - name: Set up Python venv
+        run: |
+          set -euo pipefail
+          python3 --version
+          rm -rf .venv
+          python3 -m venv .venv
+          echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
+
+      - name: Install Python deps
+        working-directory: engpatcher
+        run: |
+          set -euo pipefail
+          # EngPatcher moved requirements.txt → dev/ (c42db0b); keep old refs building.
+          if [ -f dev/requirements.txt ]; then
+            REQ=dev/requirements.txt
+          else
+            REQ=requirements.txt
+          fi
+          python3 -m pip install --upgrade pip
+          python3 -m pip install -r "$REQ"
+
+      - name: Apply optional repo vars (without clobbering runner env)
+        env:
+          V_IMG: ${{ vars.NLPP_VANILLA_IMG }}
+          V_CODE: ${{ vars.NLPP_VANILLA_CODE }}
+          V_TRB: ${{ vars.NLPP_VANILLA_TRB }}
+          V_RES: ${{ vars.NLPP_VANILLA_RESIDENT_TRB }}
+        run: |
+          set -euo pipefail
+          [ -n "$V_IMG" ]  && echo "NLPP_VANILLA_IMG=$V_IMG" >> "$GITHUB_ENV"
+          [ -n "$V_CODE" ] && echo "NLPP_VANILLA_CODE=$V_CODE" >> "$GITHUB_ENV"
+          [ -n "$V_TRB" ]  && echo "NLPP_VANILLA_TRB=$V_TRB" >> "$GITHUB_ENV"
+          [ -n "$V_RES" ]  && echo "NLPP_VANILLA_RESIDENT_TRB=$V_RES" >> "$GITHUB_ENV"
+          true
+
+      - name: Check vanilla inputs
+        run: |
+          set -euo pipefail
+          fail=0
+          for var in NLPP_VANILLA_IMG NLPP_VANILLA_CODE NLPP_VANILLA_TRB NLPP_VANILLA_RESIDENT_TRB; do
+            path="${!var:-}"
+            if [ -z "$path" ]; then
+              echo "::error::$var not set (runner .env or repo variable)"
+              fail=1
+            elif [ ! -f "$path" ]; then
+              echo "::error::$var points at a missing file: $path"
+              fail=1
+            else
+              echo "$var: $path"
+            fi
+          done
+          exit "$fail"
+
+      - name: Fetch previous bake when skip_pack
+        if: steps.meta.outputs.skip_pack == 'true'
+        working-directory: engpatcher
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python3 tools/fetch_release_bake.py --repo "${{ github.repository }}" --tag latest --force
+
+      - name: Rebuild gold bake
+        working-directory: engpatcher
+        env:
+          SKIP_PACK: ${{ steps.meta.outputs.skip_pack }}
+          WORKERS: ${{ steps.meta.outputs.workers }}
+        run: |
+          set -euo pipefail
+          # Avoid mid-bake POSTs from patch_textresource rebuild; dedicated
+          # step below posts once with CI secrets after the bake succeeds.
+          export NLPP_PROGRESS_SKIP=1
+          ARGS=(tools/rebuild_bake_img.py --vanilla "$NLPP_VANILLA_IMG")
+          if [ -n "${NLPP_PACK_CACHE:-}" ]; then
+            ARGS+=(--cache-dir "$NLPP_PACK_CACHE")
+          fi
+          if [ "$SKIP_PACK" = "true" ]; then
+            ARGS+=(--skip-pack)
+          else
+            ARGS+=(--workers "$WORKERS")
+          fi
+          echo "python3 ${ARGS[*]}"
+          python3 "${ARGS[@]}"
+
+      - name: Report script-text progress to companion site
+        working-directory: engpatcher
+        env:
+          NLPP_PROGRESS_ENDPOINT: ${{ secrets.NLPP_PROGRESS_ENDPOINT }}
+          NLPP_PROGRESS_TOKEN: ${{ secrets.NLPP_PROGRESS_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${NLPP_PROGRESS_ENDPOINT:-}" ] || [ -z "${NLPP_PROGRESS_TOKEN:-}" ]; then
+            echo "NLPP_PROGRESS_ENDPOINT / NLPP_PROGRESS_TOKEN secrets unset — skipping"
+            exit 0
+          fi
+          python3 src/report_progress.py --best-effort
+
+      - name: Package romfs_overlay.zip
+        working-directory: engpatcher
+        run: |
+          set -euo pipefail
+          rm -f release/romfs_overlay.zip
+          (cd release && zip -r romfs_overlay.zip romfs_overlay)
+          ls -lh release/bake_img.bin release/romfs_overlay.zip
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.meta.outputs.tag }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          BAKE=engpatcher/release/bake_img.bin
+          ZIP=engpatcher/release/romfs_overlay.zip
+          if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
+            gh release upload "$TAG" "$BAKE" "$ZIP" --repo "$REPO" --clobber
+          else
+            gh release create "$TAG" "$BAKE" "$ZIP" \
+              --repo "$REPO" \
+              --title "$TAG" \
+              --notes "Rolling gold bake from EngPatcher. User supplies own CIA/ROM. Patch on Windows."
+          fi

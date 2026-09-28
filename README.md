@@ -24,8 +24,8 @@ CIA / drop-bat patching stays on **Windows**.
 ### 1. Clone this repo on the server
 
 ```bash
-git clone https://github.com/OWNER/nlpp-gold-maker.git ~/git-actions/nlpp-gold-maker
-cd ~/git-actions/nlpp-gold-maker
+git clone https://github.com/OWNER/THIS_REPO.git ~/git-actions/nlpp-gold
+cd ~/git-actions/nlpp-gold
 ```
 
 ### 2. Create directories + packages
@@ -33,10 +33,13 @@ cd ~/git-actions/nlpp-gold-maker
 ```bash
 sudo bash scripts/prepare-runner-dirs.sh /opt/nlpp
 sudo apt-get update
-sudo apt-get install -y python3 python3-venv python3-pip zip git
+sudo apt-get install -y python3 python3-venv python3-pip zip git gh
 ```
 
-That creates `/opt/nlpp/vanilla`, `/opt/nlpp/actions-runner`, `/opt/nlpp/cache/img_pack`.  
+`gh` (GitHub CLI) publishes the Release. If `apt` can't find it, add GitHub's apt repo
+first: <https://github.com/cli/cli/blob/trunk/docs/install_linux.md>.
+
+That creates `/opt/nlpp/vanilla` (`romfs/` + `exefs/`), `/opt/nlpp/actions-runner`, `/opt/nlpp/cache/img_pack`.  
 It does **not** install the GitHub Actions runner yet.
 
 ### 3. Copy vanilla files from your PC
@@ -51,6 +54,8 @@ Typical local source:
   img.bin
   SystemData\TextResource\textresource_jpn.trb
   SystemData\TextResource\textresource_resident_jpn.trb
+...\New Love Plus Plus\extracted\exefs\
+  code.bin          (use code.bin.bak if present — that is the untouched copy)
 ```
 
 Server destinations:
@@ -60,21 +65,26 @@ Server destinations:
 | `img.bin` | `/opt/nlpp/vanilla/romfs/img.bin` |
 | `textresource_jpn.trb` | `/opt/nlpp/vanilla/romfs/SystemData/TextResource/` |
 | `textresource_resident_jpn.trb` | `/opt/nlpp/vanilla/romfs/SystemData/TextResource/` |
+| `exefs\code.bin` | `/opt/nlpp/vanilla/exefs/code.bin` |
+
+`code.bin` is required — the bake patches it into `release/name_input_code.bin`.
 
 **From PowerShell on your Windows PC** (Tailscale connected; replace host/user/path):
 
 ```powershell
 $server = "zepse@mainserver"   # Tailscale MagicDNS name or 100.x.x.x
 $src = "C:\Users\YOU\Documents\New Love Plus Decompilation\New Love Plus Plus\extracted\romfs"
+$exefs = "$src\..\exefs"
 
 # /opt/nlpp was created as root — fix ownership first (-t = sudo can ask for password)
-ssh -t $server "sudo chown -R `$USER:`$USER /opt/nlpp/vanilla"
+ssh -t $server "sudo mkdir -p /opt/nlpp/vanilla/exefs && sudo chown -R `$USER:`$USER /opt/nlpp/vanilla"
 
 scp "$src\img.bin" "${server}:/opt/nlpp/vanilla/romfs/img.bin"
 scp "$src\SystemData\TextResource\textresource_jpn.trb" `
   "${server}:/opt/nlpp/vanilla/romfs/SystemData/TextResource/"
 scp "$src\SystemData\TextResource\textresource_resident_jpn.trb" `
   "${server}:/opt/nlpp/vanilla/romfs/SystemData/TextResource/"
+scp "$exefs\code.bin" "${server}:/opt/nlpp/vanilla/exefs/code.bin"
 ```
 
 If `scp` says **Permission denied**, ownership wasn’t fixed — re-run the `ssh -t ... chown` line.  
@@ -85,6 +95,7 @@ On the server, confirm:
 ```bash
 ls -lh /opt/nlpp/vanilla/romfs/img.bin
 ls -lh /opt/nlpp/vanilla/romfs/SystemData/TextResource/
+ls -lh /opt/nlpp/vanilla/exefs/code.bin
 ```
 
 ### 4. Install the GitHub Actions runner
@@ -96,7 +107,7 @@ ls -lh /opt/nlpp/vanilla/romfs/SystemData/TextResource/
 ```bash
 cd /opt/nlpp/actions-runner
 # paste GitHub’s curl + tar commands here
-./config.sh --url https://github.com/OWNER/nlpp-gold-maker --token PASTE_TOKEN_FROM_GITHUB
+./config.sh --url https://github.com/OWNER/THIS_REPO --token PASTE_TOKEN_FROM_GITHUB
 sudo ./svc.sh install
 sudo ./svc.sh start
 ```
@@ -106,11 +117,12 @@ Confirm the runner shows **Idle** under Settings → Actions → Runners.
 
 ### 5. Point the runner at vanilla
 
-Put these in the runner environment so jobs see them. Easiest: create/edit
-`/opt/nlpp/actions-runner/.env`:
+Put these in the runner environment so jobs see them. Easiest: copy
+[`.env.example`](.env.example) → `/opt/nlpp/actions-runner/.env`:
 
 ```bash
 NLPP_VANILLA_IMG=/opt/nlpp/vanilla/romfs/img.bin
+NLPP_VANILLA_CODE=/opt/nlpp/vanilla/exefs/code.bin
 NLPP_VANILLA_TRB=/opt/nlpp/vanilla/romfs/SystemData/TextResource/textresource_jpn.trb
 NLPP_VANILLA_RESIDENT_TRB=/opt/nlpp/vanilla/romfs/SystemData/TextResource/textresource_resident_jpn.trb
 NLPP_PACK_CACHE=/opt/nlpp/cache/img_pack
@@ -129,15 +141,21 @@ sudo ./svc.sh start
 On **EngPatcher**:
 
 1. Secret `NLPP_GOLD_DISPATCH_TOKEN` = a PAT that can
-   `POST /repos/OWNER/nlpp-gold-maker/dispatches`
-2. If this repo isn’t named `OWNER/nlpp-gold`, set variable
-   `NLPP_GOLD_REPO=OWNER/nlpp-gold-maker`
+   `POST /repos/OWNER/THIS_REPO/dispatches`
+   (fine-grained: only this repo, **Contents: Read and write**)
+2. Variable `NLPP_GOLD_REPO=OWNER/THIS_REPO`. EngPatcher defaults to
+   `OWNER/nlpp-gold-maker`, so set this if your repo has any other name.
 3. Ensure `.github/workflows/request-gold-release.yml` is on EngPatcher `main`
 
 If EngPatcher is **private**, add secret `ENGPATCHER_CHECKOUT_TOKEN` on **this** repo
 (contents:read).
 
-Optional vars on this repo: `NLPP_PACK_WORKERS`, `NLPP_ENGPATCHER_REPO`, `NLPP_ENGPATCHER_REF`.
+Optional vars on this repo: `NLPP_PACK_WORKERS`, `NLPP_ENGPATCHER_REPO`
+(default `OWNER/NewLovePlusPlusEngPatcher`), `NLPP_ENGPATCHER_REF`.
+Manual runs are limited to the repo owner.
+
+Optional secrets for the companion-site progress bar: `NLPP_PROGRESS_ENDPOINT`,
+`NLPP_PROGRESS_TOKEN`. If unset, that step is skipped.
 
 ### 7. Smoke test
 
@@ -153,8 +171,8 @@ Watch the self-hosted job. First full pack can take many hours.
 From an EngPatcher clone (any OS):
 
 ```bash
-python tools/fetch_release_bake.py --repo OWNER/nlpp-gold-maker --tag gold
-# or: export NLPP_GITHUB_REPO=OWNER/nlpp-gold-maker
+python tools/fetch_release_bake.py --repo OWNER/THIS_REPO --tag gold
+# or: export NLPP_GITHUB_REPO=OWNER/THIS_REPO
 ```
 
 Then patch CIAs on Windows with the drop-bat / `patch_cia`.

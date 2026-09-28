@@ -1,0 +1,21 @@
+# Never commit game data or gold binaries
+*.cia
+*.cxi
+*.cci
+*.3ds
+*.app
+img.bin
+*.ncch
+bake_img.bin
+romfs_overlay/
+romfs_overlay.zip
+cache/
+out/
+engpatcher/
+
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.DS_Store
+Thumbs.db
