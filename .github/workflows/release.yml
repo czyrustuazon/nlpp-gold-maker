@@ -9,6 +9,8 @@
 #   - assets/images, pack_images, image_map, bclimutil, or nlpp-tools changed → full pack
 # No Release yet → full PNG pack.
 # github.com:443 unreachable → offline bake from local vanilla (no download, no Release upload).
+# A run that will publish a new bake deletes Release tag gold first, after any
+# skip-pack download, so Drop does not fetch the bake being replaced.
 # workflow_dispatch force_pack (or client_payload.force_pack) always full-packs.
 #
 # Target: headless Ubuntu x86_64 self-hosted runner.
@@ -333,6 +335,21 @@ jobs:
         run: |
           set -euo pipefail
           python3 tools/fetch_release_bake.py --repo "$REPO" --tag "$TAG" --force
+
+      - name: Delete the published gold bake this run will replace
+        if: steps.reuse.outputs.mode != 'current' && steps.net.outputs.online == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.meta.outputs.tag }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
+            gh release delete "$TAG" --repo "$REPO" --yes --cleanup-tag
+            echo "Deleted Release $TAG. Drop will pack locally until this run publishes a new bake."
+          else
+            echo "No Release $TAG to delete."
+          fi
 
       - name: Rebuild gold bake
         if: steps.reuse.outputs.mode != 'current'
