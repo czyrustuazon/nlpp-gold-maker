@@ -7,12 +7,13 @@ consumers. You edit EngPatcher; this repo only runs the Ubuntu bake and hosts Re
 ```text
   push / merge → EngPatcher main
         → Request gold Release (dispatches here)
-        → self-hosted Ubuntu bake
+        → if Release "gold" already has bake_img.bin, download it
+             (full PNG pack only when missing, image inputs changed, or force_pack)
         → Release tag "gold" (assets replaced)
         → fetch_release_bake.py --tag gold
 ```
 
-Other EngPatcher branches do nothing. Full PNG pack can take many hours.
+Other EngPatcher branches do nothing. A from-scratch PNG pack can take many hours.
 CIA / drop-bat patching stays on **Windows**.
 
 ---
