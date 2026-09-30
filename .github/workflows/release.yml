@@ -143,12 +143,7 @@ jobs:
         id: net
         run: |
           set -euo pipefail
-          if python3 -c 'import socket,sys
-try:
-    c = socket.create_connection(("github.com", 443), 5)
-    c.close()
-except OSError:
-    sys.exit(1)'; then
+          if python3 -c 'import socket; socket.create_connection(("github.com", 443), 5).close()'; then
             echo "online=true" >> "$GITHUB_OUTPUT"
             echo "github.com:443 reachable"
           else
@@ -202,19 +197,7 @@ except OSError:
           HAS=false
           REL_JSON=$(mktemp)
           if [ "$ONLINE" = "true" ] && gh release view "$TAG" --repo "$REPO" --json body,assets >"$REL_JSON" 2>/dev/null; then
-            eval "$(python3 -c '
-import json, sys
-meta = json.load(open(sys.argv[1], encoding="utf-8"))
-names = {a.get("name") for a in meta.get("assets") or []}
-has = "bake_img.bin" in names and "romfs_overlay.zip" in names
-prev = ""
-for line in (meta.get("body") or "").splitlines():
-    if line.startswith("engpatcher_sha:"):
-        prev = line.split(":", 1)[1].strip()
-        break
-print("has=" + ("true" if has else "false"))
-print("prev=" + prev)
-' "$REL_JSON")"
+            eval "$(python3 -c 'import json,sys; meta=json.load(open(sys.argv[1], encoding="utf-8")); names={a.get("name") for a in (meta.get("assets") or [])}; has="bake_img.bin" in names and "romfs_overlay.zip" in names; prev=next((line.split(":",1)[1].strip() for line in (meta.get("body") or "").splitlines() if line.startswith("engpatcher_sha:")), ""); print("has="+("true" if has else "false")); print("prev="+prev)' "$REL_JSON")"
             HAS="$has"
             PREV="${prev:-}"
           fi
