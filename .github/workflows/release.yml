@@ -1,10 +1,13 @@
-# Bake EngPatcher → publish bake_img.bin + romfs_overlay.zip on THIS repo's Releases.
+# Bake EngPatcher → publish bake_img.bin + name_input_code.bin + romfs_overlay.zip
+# on THIS repo's Releases.
 #
 # Primary trigger: EngPatcher push to main (request-gold-release.yml → repository_dispatch).
 # Also: workflow_dispatch on this repo (repo owner only).
 #
 # If Release tag already has bake_img.bin + romfs_overlay.zip:
-#   - same EngPatcher SHA as the Release notes → stop (already published)
+#   - same EngPatcher SHA and name_input_code.bin already uploaded → stop
+#   - same SHA but name_input_code.bin missing → download the bake and rebuild
+#     only that code.bin (--skip-pack --skip-deploys --skip-trb)
 #   - PNG-pack inputs unchanged since that SHA → download the bake and --skip-pack
 #   - assets/images, pack_images, image_map, bclimutil, or nlpp-tools changed → full pack
 # No Release yet → full PNG pack.
@@ -178,9 +181,10 @@ jobs:
           fi
           echo "Offline bake using $(git -C engpatcher rev-parse --short HEAD)"
 
-      # current = Release already built this SHA (do nothing)
-      # reuse   = download bake_img.bin and --skip-pack
-      # full    = PNG pack from vanilla
+      # current   = Release already built this SHA, including name_input_code.bin
+      # code_only = same SHA, but the Release is missing name_input_code.bin
+      # reuse     = download bake_img.bin and --skip-pack
+      # full      = PNG pack from vanilla
       - name: Decide whether to download the existing gold bake
         id: reuse
         env:
@@ -197,10 +201,12 @@ jobs:
           REASON="no Release ${TAG} yet"
           PREV=""
           HAS=false
+          HAS_CODE=false
           REL_JSON=$(mktemp)
           if [ "$ONLINE" = "true" ] && gh release view "$TAG" --repo "$REPO" --json body,assets >"$REL_JSON" 2>/dev/null; then
-            eval "$(python3 -c 'import json,sys; meta=json.load(open(sys.argv[1], encoding="utf-8")); names={a.get("name") for a in (meta.get("assets") or [])}; has="bake_img.bin" in names and "romfs_overlay.zip" in names; prev=next((line.split(":",1)[1].strip() for line in (meta.get("body") or "").splitlines() if line.startswith("engpatcher_sha:")), ""); print("has="+("true" if has else "false")); print("prev="+prev)' "$REL_JSON")"
+            eval "$(python3 -c 'import json,sys; meta=json.load(open(sys.argv[1], encoding="utf-8")); names={a.get("name") for a in (meta.get("assets") or [])}; has="bake_img.bin" in names and "romfs_overlay.zip" in names; has_code="name_input_code.bin" in names; prev=next((line.split(":",1)[1].strip() for line in (meta.get("body") or "").splitlines() if line.startswith("engpatcher_sha:")), ""); print("has="+("true" if has else "false")); print("has_code="+("true" if has_code else "false")); print("prev="+prev)' "$REL_JSON")"
             HAS="$has"
+            HAS_CODE="$has_code"
             PREV="${prev:-}"
           fi
           rm -f "$REL_JSON"
@@ -247,6 +253,13 @@ jobs:
           else
             MODE=reuse
             REASON="Release ${TAG} exists; previous EngPatcher SHA unknown, downloading it"
+          fi
+
+          # A matching SHA used to stop here and never upload name_input_code.bin.
+          # Backfill that file from the vanilla code.bin without repacking menus.
+          if [ "$MODE" = "current" ] && [ "$HAS_CODE" != "true" ]; then
+            MODE=code_only
+            REASON="Release ${TAG} matches ${HEAD} but is missing name_input_code.bin"
           fi
 
           {
@@ -326,7 +339,7 @@ jobs:
           exit "$fail"
 
       - name: Download existing gold bake
-        if: steps.reuse.outputs.mode == 'reuse'
+        if: steps.reuse.outputs.mode == 'reuse' || steps.reuse.outputs.mode == 'code_only'
         working-directory: engpatcher
         env:
           GH_TOKEN: ${{ github.token }}
@@ -336,8 +349,10 @@ jobs:
           set -euo pipefail
           python3 tools/fetch_release_bake.py --repo "$REPO" --tag "$TAG" --force
 
+      # code_only adds name_input_code.bin onto the live Release. Deleting the
+      # tag first would force Drop into a local pack while that file is built.
       - name: Delete the published gold bake this run will replace
-        if: steps.reuse.outputs.mode != 'current' && steps.net.outputs.online == 'true'
+        if: steps.reuse.outputs.mode != 'current' && steps.reuse.outputs.mode != 'code_only' && steps.net.outputs.online == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ steps.meta.outputs.tag }}
@@ -366,7 +381,9 @@ jobs:
           if [ -n "${NLPP_PACK_CACHE:-}" ]; then
             ARGS+=(--cache-dir "$NLPP_PACK_CACHE")
           fi
-          if [ "$MODE" = "reuse" ]; then
+          if [ "$MODE" = "code_only" ]; then
+            ARGS+=(--skip-pack --skip-deploys --skip-trb)
+          elif [ "$MODE" = "reuse" ]; then
             ARGS+=(--skip-pack)
           else
             ARGS+=(--workers "$WORKERS")
@@ -394,8 +411,9 @@ jobs:
         run: |
           set -euo pipefail
           rm -f release/romfs_overlay.zip
+          test -f release/name_input_code.bin
           (cd release && zip -r romfs_overlay.zip romfs_overlay)
-          ls -lh release/bake_img.bin release/romfs_overlay.zip
+          ls -lh release/bake_img.bin release/name_input_code.bin release/romfs_overlay.zip
 
       - name: Leave the offline bake on the runner
         if: steps.reuse.outputs.online == 'false'
@@ -415,21 +433,25 @@ jobs:
         run: |
           set -euo pipefail
           BAKE=engpatcher/release/bake_img.bin
+          CODE=engpatcher/release/name_input_code.bin
           ZIP=engpatcher/release/romfs_overlay.zip
-          if [ "$MODE" = "reuse" ]; then
-            PACK=skip
-          else
+          test -f "$CODE"
+          if [ "$MODE" = "full" ]; then
             PACK=full
+          elif [ "$MODE" = "code_only" ]; then
+            PACK=code_only
+          else
+            PACK=skip
           fi
           NOTES=$(printf '%s\n' \
             "Rolling gold bake from EngPatcher. User supplies own CIA/ROM. Patch on Windows." \
             "engpatcher_sha: ${SHA}" \
             "pack: ${PACK}")
           if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
-            gh release upload "$TAG" "$BAKE" "$ZIP" --repo "$REPO" --clobber
+            gh release upload "$TAG" "$BAKE" "$ZIP" "$CODE" --repo "$REPO" --clobber
             gh release edit "$TAG" --repo "$REPO" --notes "$NOTES"
           else
-            gh release create "$TAG" "$BAKE" "$ZIP" \
+            gh release create "$TAG" "$BAKE" "$ZIP" "$CODE" \
               --repo "$REPO" \
               --title "$TAG" \
               --notes "$NOTES"
