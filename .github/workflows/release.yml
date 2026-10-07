@@ -12,6 +12,10 @@
 #   - assets/images, pack_images, image_map, bclimutil, or nlpp-tools changed → full pack
 # No Release yet → full PNG pack.
 # github.com:443 unreachable → offline bake from local vanilla (no download, no Release upload).
+# Gates: EngPatcher's code.bin tests run against the runner's vanilla before
+# the Release is touched (failure keeps the old bake up). After the bake,
+# name_input_code.bin must match the committed snapshot hash or nothing is
+# published.
 # A run that will publish a new bake deletes Release tag gold first, after any
 # skip-pack download, so Drop does not fetch the bake being replaced.
 # workflow_dispatch force_pack (or client_payload.force_pack) always full-packs.
@@ -296,7 +300,10 @@ jobs:
         run: |
           set -euo pipefail
           # EngPatcher moved requirements.txt → dev/ (c42db0b); keep old refs building.
-          if [ -f dev/requirements.txt ]; then
+          # requirements-dev.txt adds pytest for the code.bin gate below.
+          if [ -f dev/requirements-dev.txt ]; then
+            REQ=dev/requirements-dev.txt
+          elif [ -f dev/requirements.txt ]; then
             REQ=dev/requirements.txt
           else
             REQ=requirements.txt
@@ -337,6 +344,23 @@ jobs:
             fi
           done
           exit "$fail"
+
+      # Runs before the old Release is touched, so a failure leaves the last
+      # good gold bake up for Drop. Missing/wrong vanilla fails instead of
+      # skipping (NLPP_REQUIRE_CODE_CHECKS).
+      - name: Check code.bin patches against vanilla
+        if: steps.reuse.outputs.mode != 'current'
+        working-directory: engpatcher
+        env:
+          NLPP_REQUIRE_CODE_CHECKS: "1"
+        run: |
+          set -euo pipefail
+          if [ ! -f tests/test_code_patch_map.py ]; then
+            echo "EngPatcher ref predates tests/test_code_patch_map.py; skipping"
+            exit 0
+          fi
+          python3 -m pytest tests/test_code_patch_map.py tests/test_patch_blob_snapshots.py \
+            -q -rs -p no:cacheprovider
 
       - name: Download existing gold bake
         if: steps.reuse.outputs.mode == 'reuse' || steps.reuse.outputs.mode == 'code_only'
@@ -390,6 +414,18 @@ jobs:
           fi
           echo "python3 ${ARGS[*]}"
           python3 "${ARGS[@]}"
+
+      # Only publish the exact code.bin the reviewed snapshot describes.
+      - name: Verify name_input_code.bin against the reviewed snapshot
+        if: steps.reuse.outputs.mode != 'current'
+        working-directory: engpatcher
+        run: |
+          set -euo pipefail
+          if [ ! -f tools/verify_name_input_code.py ]; then
+            echo "EngPatcher ref predates tools/verify_name_input_code.py; skipping"
+            exit 0
+          fi
+          python3 tools/verify_name_input_code.py --code release/name_input_code.bin
 
       - name: Report script-text progress to companion site
         if: steps.reuse.outputs.mode != 'current' && steps.net.outputs.online == 'true'

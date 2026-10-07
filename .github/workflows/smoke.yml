@@ -1,0 +1,151 @@
+# Boot the published gold bake in Azahar and fail on a crash.
+#
+# Runs after each successful "Release gold bake" (and on demand). It tests what
+# Drop users download: the Release assets, laid out as LayeredFS. The patched
+# Azahar replays three real hardware crashes (NLPP_EMU_*); a build that lost
+# its guard data-aborts and this job goes red. It never blocks or edits the
+# Release.
+#
+# One-time runner setup: scripts/setup-smoke-runner.sh builds azahar-3ds-accurate
+# (README → Azahar smoke boot).
+# Until the runner .env has NLPP_SMOKE_AZAHAR / NLPP_ROM / NLPP_SMOKE_SEED_USER,
+# the job logs a notice and passes.
+
+name: Smoke boot gold bake
+
+on:
+  workflow_run:
+    workflows: ["Release gold bake"]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: "Release tag to boot"
+        type: string
+        default: "gold"
+      inject:
+        description: "Hardware-crash replays (comma list; blank = plain boot)"
+        type: string
+        default: "name-walk,pane-flag,menu-vt"
+      seconds:
+        description: "Wall-clock budget (software OpenGL on the laptop is slow)"
+        type: string
+        default: "1800"
+
+permissions:
+  contents: read
+
+# Not the bake's "gold-bake" group: joining it would cancel a pending bake.
+# The single runner still runs one job at a time.
+concurrency:
+  group: gold-smoke
+  cancel-in-progress: true
+
+jobs:
+  smoke:
+    runs-on: self-hosted
+    if: >-
+      (github.event_name == 'workflow_dispatch' && github.actor == github.repository_owner) ||
+      (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success')
+    timeout-minutes: 120
+    env:
+      ENGPATCHER_REPO: ${{ vars.NLPP_ENGPATCHER_REPO || format('{0}/NewLovePlusPlusEngPatcher', github.repository_owner) }}
+      TAG: ${{ inputs.tag_name || 'gold' }}
+      INJECT: ${{ github.event_name == 'workflow_dispatch' && inputs.inject || 'name-walk,pane-flag,menu-vt' }}
+      SECONDS_BUDGET: ${{ inputs.seconds || '1800' }}
+
+    steps:
+      - name: Check smoke prerequisites
+        id: pre
+        run: |
+          set -euo pipefail
+          missing=0
+          for var in NLPP_SMOKE_AZAHAR NLPP_ROM NLPP_SMOKE_SEED_USER; do
+            path="${!var:-}"
+            if [ -z "$path" ] || [ ! -e "$path" ]; then
+              echo "::notice::$var not set or missing (${path:-unset}); see scripts/setup-smoke-runner.sh"
+              missing=1
+            fi
+          done
+          for bin in xvfb-run gh git python3; do
+            command -v "$bin" >/dev/null || { echo "::notice::$bin not installed"; missing=1; }
+          done
+          if [ "$missing" = 1 ]; then
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Find the EngPatcher commit the Release was baked from
+        if: steps.pre.outputs.ready == 'true'
+        id: rel
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          SHA=$(gh release view "$TAG" --repo "$REPO" --json body --jq '.body' \
+            | sed -n 's/^engpatcher_sha:[[:space:]]*\([0-9a-f]\{7,40\}\).*/\1/p' | head -n 1)
+          if [ -z "$SHA" ]; then
+            echo "::error::Release $TAG has no engpatcher_sha line" >&2
+            exit 1
+          fi
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+          echo "Release $TAG was baked from EngPatcher $SHA"
+
+      - name: Clone EngPatcher at that commit
+        if: steps.pre.outputs.ready == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.ENGPATCHER_CHECKOUT_TOKEN || github.token }}
+          SHA: ${{ steps.rel.outputs.sha }}
+        run: |
+          set -euo pipefail
+          rm -rf engpatcher-smoke
+          git clone --filter=blob:none --no-checkout \
+            "https://x-access-token:${GH_TOKEN}@github.com/${ENGPATCHER_REPO}.git" \
+            engpatcher-smoke
+          git -C engpatcher-smoke fetch --depth 1 origin "$SHA"
+          git -C engpatcher-smoke checkout FETCH_HEAD
+          if [ ! -f engpatcher-smoke/tools/smoke_boot_azahar.py ]; then
+            echo "::notice::EngPatcher $SHA predates tools/smoke_boot_azahar.py; nothing to run"
+            echo "SMOKE_SKIP=1" >> "$GITHUB_ENV"
+          fi
+
+      - name: Python venv
+        if: steps.pre.outputs.ready == 'true' && env.SMOKE_SKIP != '1'
+        working-directory: engpatcher-smoke
+        run: |
+          set -euo pipefail
+          VENV="$GITHUB_WORKSPACE/.venv-smoke"
+          [ -x "$VENV/bin/python" ] || python3 -m venv "$VENV"
+          "$VENV/bin/python" -m pip install -q -r dev/requirements.txt
+          echo "$VENV/bin" >> "$GITHUB_PATH"
+
+      - name: Download the published Release
+        if: steps.pre.outputs.ready == 'true' && env.SMOKE_SKIP != '1'
+        working-directory: engpatcher-smoke
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: python3 tools/fetch_release_bake.py --repo "$REPO" --tag "$TAG" --force
+
+      - name: Boot in Azahar
+        if: steps.pre.outputs.ready == 'true' && env.SMOKE_SKIP != '1'
+        working-directory: engpatcher-smoke
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: "1"   # no FUSE needed on the runner
+        run: |
+          set -euo pipefail
+          python3 tools/smoke_boot_azahar.py \
+            --azahar "$NLPP_SMOKE_AZAHAR" \
+            --rom "$NLPP_ROM" \
+            --seed-user "$NLPP_SMOKE_SEED_USER" \
+            --inject "$INJECT" \
+            --seconds "$SECONDS_BUDGET" \
+            --work "$RUNNER_TEMP/nlpp-smoke"
+
+      - name: Show the Azahar log tail
+        if: failure() && steps.pre.outputs.ready == 'true'
+        run: |
+          tail -n 80 "$RUNNER_TEMP/nlpp-smoke/azahar_log.txt" 2>/dev/null || true
+          tail -n 40 "$RUNNER_TEMP/nlpp-smoke/azahar_stdout.txt" 2>/dev/null || true

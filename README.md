@@ -159,12 +159,48 @@ Manual runs are limited to the repo owner.
 Optional secrets for the companion-site progress bar: `NLPP_PROGRESS_ENDPOINT`,
 `NLPP_PROGRESS_TOKEN`. If unset, that step is skipped.
 
-### 7. Smoke test
+### 7. First run
 
 - Push/merge to EngPatcher **`main`**, or  
 - This repo → **Actions → Release gold bake → Run workflow**
 
 Watch the self-hosted job. First full pack can take many hours.
+
+**code.bin gates.** Before touching the Release, the bake runs EngPatcher's
+`tests/test_code_patch_map.py` against `NLPP_VANILLA_CODE`; after the bake,
+`name_input_code.bin` must match the hash committed in EngPatcher
+`tests/snapshots/code_patch_map.json`. A wrong vanilla dump fails here too
+(expected sha256 `a83d349d0a000a127f93f743c038921903a2aae111b4b9005aadd446324ab890`),
+so use the untouched `code.bin.bak` if your extract has one.
+
+### 8. Azahar smoke boot (optional)
+
+`.github/workflows/smoke.yml` boots each published gold bake in
+[azahar-3ds-accurate](https://github.com/czyrustuazon/azahar-3ds-accurate)
+under Xvfb + software OpenGL and fails if the game data-aborts. That fork
+replays three real hardware crashes; a build that lost its guard goes red. It
+never blocks or edits the Release.
+
+```bash
+# Docker build of the fork's main. 1-3 hours on a 2-core laptop.
+# Re-run after pushing changes to the fork.
+sudo bash scripts/setup-smoke-runner.sh
+```
+
+Then copy from your PC:
+
+| What | On server |
+|------|-----------|
+| Decrypted New Love Plus+ `.3ds` / `.cci` | `/opt/nlpp/vanilla/rom.3ds` |
+| `sdmc/` and `nand/` from an Azahar user folder with a title save (e.g. EngPatcher `ab_test/azahar_instances/a/user/`) | `/opt/nlpp/smoke/seed_user/` |
+
+Without a save the game sits on its create-save prompt and the crash sites are
+never reached. Add the three `NLPP_SMOKE_*` / `NLPP_ROM` lines from
+[`.env.example`](.env.example) to the runner `.env` and restart it. Until then
+the smoke job logs a notice and passes.
+
+Keep the laptop awake with the lid shut: set `HandleLidSwitch=ignore` in
+`/etc/systemd/logind.conf`, then `sudo systemctl restart systemd-logind`.
 
 ---
 
