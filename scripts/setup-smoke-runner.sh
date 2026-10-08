@@ -40,6 +40,11 @@ docker run --rm -v "$SRC:/src" -w /src -e HOME=/tmp "$IMAGE" bash -euxc "
     -DCMAKE_LINKER=/etc/bin/ld.lld \
     -DENABLE_ROOM_STANDALONE=OFF
   ninja -C build -j $JOBS
+  # linuxdeploy-plugin-qt (2026-10 builds) needs qmlimportscanner even though
+  # Azahar has no QML; the image ships Qt 6 without it.
+  if [ ! -x /usr/lib/qt6/libexec/qmlimportscanner ]; then
+    apt-get update -qq && apt-get install -y -qq qt6-declarative-dev-tools
+  fi
   ninja -C build bundle
 "
 
