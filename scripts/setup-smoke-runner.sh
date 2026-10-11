@@ -21,7 +21,8 @@ JOBS="${NLPP_AZAHAR_JOBS:-2}"
 
 apt-get update
 # xvfb + xauth: headless X for xvfb-run. Mesa: llvmpipe software OpenGL.
-apt-get install -y docker.io git xvfb xauth libgl1-mesa-dri libegl1 libglx-mesa0 fonts-dejavu-core
+# libopengl0, libfontconfig1, libharfbuzz0b: host GUI/GL dispatch libraries excluded by AppImage bundling.
+apt-get install -y docker.io git xvfb xauth libgl1-mesa-dri libegl1 libglx-mesa0 fonts-dejavu-core libopengl0 libfontconfig1 libharfbuzz0b
 
 mkdir -p "$ROOT/src" "$ROOT/azahar" "$ROOT/smoke"
 if [ ! -d "$SRC/.git" ]; then

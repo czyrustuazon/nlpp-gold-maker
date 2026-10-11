@@ -185,6 +185,8 @@ never blocks or edits the Release.
 # Docker build of the fork's main. 1-3 hours on a 2-core laptop.
 # Re-run after pushing changes to the fork.
 sudo bash scripts/setup-smoke-runner.sh
+# If Azahar is already built, ensure host libraries are installed:
+sudo apt-get install -y libopengl0 libfontconfig1 libharfbuzz0b
 ```
 
 Then copy from your PC:
