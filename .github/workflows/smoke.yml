@@ -71,7 +71,7 @@ jobs:
             command -v "$bin" >/dev/null || { echo "::notice::$bin not installed"; missing=1; }
           done
           if [ "$missing" = 0 ]; then
-            if ! out=$(APPIMAGE_EXTRACT_AND_RUN=1 xvfb-run -a -s "-screen 0 1280x1024x24" "$NLPP_SMOKE_AZAHAR" --help 2>&1); then
+            if ! out=$(APPIMAGE_EXTRACT_AND_RUN=1 "$NLPP_SMOKE_AZAHAR" --help 2>&1); then
               echo "::error::$NLPP_SMOKE_AZAHAR failed to execute. Host may be missing libraries (libopengl0, libfontconfig1, libharfbuzz0b): $out"
               missing=1
             fi
