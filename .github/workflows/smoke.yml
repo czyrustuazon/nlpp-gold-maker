@@ -155,3 +155,58 @@ jobs:
         run: |
           tail -n 80 "$RUNNER_TEMP/nlpp-smoke/azahar_log.txt" 2>/dev/null || true
           tail -n 40 "$RUNNER_TEMP/nlpp-smoke/azahar_stdout.txt" 2>/dev/null || true
+
+      - name: Discord status
+        if: always()
+        env:
+          WEBHOOK: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          STATUS: ${{ job.status }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          TAG: ${{ env.TAG }}
+          READY: ${{ steps.pre.outputs.ready }}
+          SHA: ${{ steps.rel.outputs.sha }}
+        run: |
+          set -euo pipefail
+          if [ -z "${WEBHOOK:-}" ]; then
+            echo "DISCORD_WEBHOOK_URL unset — skipping"
+            exit 0
+          fi
+          case "$STATUS" in
+            success) TITLE="✅ Smoke boot: success"; COLOR=3066993 ;;
+            failure) TITLE="❌ Smoke boot: failure"; COLOR=15158332 ;;
+            cancelled) TITLE="⚠️ Smoke boot: cancelled"; COLOR=15105570 ;;
+            *) TITLE="ℹ️ Smoke boot: $STATUS"; COLOR=9807270 ;;
+          esac
+          export TITLE COLOR
+          export TAG="${TAG:-gold}"
+          export READY="${READY:-unknown}"
+          SHA_SHORT="${SHA:-n/a}"
+          SHA_SHORT="${SHA_SHORT:0:12}"
+          export SHA_SHORT
+          python3 -c '
+          import json, os, urllib.request
+          tag, ready, sha, run_url = (
+              os.environ["TAG"], os.environ["READY"],
+              os.environ["SHA_SHORT"], os.environ["RUN_URL"],
+          )
+          body = {
+              "embeds": [{
+                  "title": os.environ["TITLE"],
+                  "color": int(os.environ["COLOR"]),
+                  "description": (
+                      f"**tag:** `{tag}`\n"
+                      f"**ready:** `{ready}`\n"
+                      f"**engpatcher:** `{sha}`\n"
+                      f"[View run]({run_url})"
+                  ),
+              }]
+          }
+          req = urllib.request.Request(
+              os.environ["WEBHOOK"],
+              data=json.dumps(body).encode(),
+              headers={"Content-Type": "application/json"},
+              method="POST",
+          )
+          with urllib.request.urlopen(req, timeout=30) as resp:
+              print(f"Discord HTTP {resp.status}")
+          '

@@ -492,3 +492,61 @@ jobs:
               --title "$TAG" \
               --notes "$NOTES"
           fi
+
+      - name: Discord status
+        if: always()
+        env:
+          WEBHOOK: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          STATUS: ${{ job.status }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          TAG: ${{ steps.meta.outputs.tag }}
+          MODE: ${{ steps.reuse.outputs.mode }}
+          SHA: ${{ steps.reuse.outputs.sha }}
+          ONLINE: ${{ steps.net.outputs.online }}
+        run: |
+          set -euo pipefail
+          if [ -z "${WEBHOOK:-}" ]; then
+            echo "DISCORD_WEBHOOK_URL unset — skipping"
+            exit 0
+          fi
+          case "$STATUS" in
+            success) TITLE="✅ Gold bake: success"; COLOR=3066993 ;;
+            failure) TITLE="❌ Gold bake: failure"; COLOR=15158332 ;;
+            cancelled) TITLE="⚠️ Gold bake: cancelled"; COLOR=15105570 ;;
+            *) TITLE="ℹ️ Gold bake: $STATUS"; COLOR=9807270 ;;
+          esac
+          export TITLE COLOR
+          export TAG="${TAG:-gold}"
+          export MODE="${MODE:-unknown}"
+          export ONLINE="${ONLINE:-unknown}"
+          export SHA_SHORT="${SHA:-unknown}"
+          SHA_SHORT="${SHA_SHORT:0:12}"
+          export SHA_SHORT
+          python3 -c '
+          import json, os, urllib.request
+          tag, mode, sha, online, run_url = (
+              os.environ["TAG"], os.environ["MODE"], os.environ["SHA_SHORT"],
+              os.environ["ONLINE"], os.environ["RUN_URL"],
+          )
+          body = {
+              "embeds": [{
+                  "title": os.environ["TITLE"],
+                  "color": int(os.environ["COLOR"]),
+                  "description": (
+                      f"**tag:** `{tag}`\n"
+                      f"**mode:** `{mode}`\n"
+                      f"**engpatcher:** `{sha}`\n"
+                      f"**online:** `{online}`\n"
+                      f"[View run]({run_url})"
+                  ),
+              }]
+          }
+          req = urllib.request.Request(
+              os.environ["WEBHOOK"],
+              data=json.dumps(body).encode(),
+              headers={"Content-Type": "application/json"},
+              method="POST",
+          )
+          with urllib.request.urlopen(req, timeout=30) as resp:
+              print(f"Discord HTTP {resp.status}")
+          '

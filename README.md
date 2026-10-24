@@ -159,6 +159,9 @@ Manual runs are limited to the repo owner.
 Optional secrets for the companion-site progress bar: `NLPP_PROGRESS_ENDPOINT`,
 `NLPP_PROGRESS_TOKEN`. If unset, that step is skipped.
 
+Optional secret `DISCORD_WEBHOOK_URL` posts bake and smoke job status (success /
+failure / cancelled) to Discord. If unset, those steps skip.
+
 ### 7. First run
 
 - Push/merge to EngPatcher **`main`**, or  
