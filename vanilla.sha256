@@ -1,0 +1,11 @@
+# Expected SHA-256 of the vanilla (unpatched) New Love Plus+ files the bake reads.
+# Checked by the "Check vanilla inputs" step in .github/workflows/release.yml;
+# any mismatch fails the run before the bake starts.
+#
+# Source: RomFS/ExeFS extracted from 00040000000F4E00_v00.3ds.
+# Format: <sha256>  <file name>   (names must match the files on the runner)
+605d988c4997244e36d0332ba9c8509e082345698def289472c127207a6afe71  img.bin
+a83d349d0a000a127f93f743c038921903a2aae111b4b9005aadd446324ab890  code.bin
+26ac7c1bb2b4a308b6b4e4393c19d50e0b23c2c18ef63df2b8e0bf337a3329c3  textresource_jpn.trb
+b6a9e0da91828f3d083eaf0185f8306f0402a694898d7744f33e8909133690c4  textresource_resident_jpn.trb
+ebf98558d4a8939f1fbea96c96fbf79cb153f58acb8c28129068ecc89a7db110  textresource_config.trb
