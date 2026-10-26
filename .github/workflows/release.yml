@@ -78,8 +78,7 @@ jobs:
       ENGPATCHER_REPO: ${{ vars.NLPP_ENGPATCHER_REPO || format('{0}/NewLovePlusPlusEngPatcher', github.repository_owner) }}
 
     steps:
-      # No actions/* — repo is pre-checked out to GITHUB_WORKSPACE;
-      # clone EngPatcher with git below.
+      # No actions/* — fetch this repo (for vanilla.sha256) and EngPatcher with plain git.
       - name: Resolve tag / EngPatcher ref / pack flags
         id: meta
         env:
@@ -159,6 +158,30 @@ jobs:
             echo "online=false" >> "$GITHUB_OUTPUT"
             echo "github.com:443 unreachable — offline bake from local vanilla"
           fi
+
+      - name: Fetch this repo
+        if: steps.net.outputs.online == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          rm -rf gold
+          git init -q gold
+          git -C gold fetch -q --depth 1 \
+            "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "$GITHUB_SHA"
+          git -C gold checkout -q FETCH_HEAD
+          test -f gold/vanilla.sha256
+          echo "gold repo at $(git -C gold rev-parse --short HEAD)"
+
+      - name: Use the runner's existing gold checkout
+        if: steps.net.outputs.online != 'true'
+        run: |
+          set -euo pipefail
+          if [ ! -f gold/vanilla.sha256 ]; then
+            echo "::error::No internet, and this runner has no gold checkout with vanilla.sha256." >&2
+            exit 1
+          fi
+          echo "Offline: vanilla.sha256 from gold repo at $(git -C gold rev-parse --short HEAD)"
 
       - name: Clone EngPatcher
         if: steps.net.outputs.online == 'true'
@@ -326,6 +349,8 @@ jobs:
           [ -n "$V_RES" ]  && echo "NLPP_VANILLA_RESIDENT_TRB=$V_RES" >> "$GITHUB_ENV"
           true
 
+      # Paths must exist AND match vanilla.sha256 — a patched "vanilla" file
+      # bakes without error but produces a double-patched Release.
       - name: Check vanilla inputs
         if: steps.reuse.outputs.mode != 'current'
         run: |
@@ -339,11 +364,66 @@ jobs:
             elif [ ! -f "$path" ]; then
               echo "::error::$var points at a missing file: $path"
               fail=1
-            else
-              echo "$var: $path"
             fi
           done
-          exit "$fail"
+          [ "$fail" = 0 ] || exit 1
+
+          # textresource_config.trb has no variable; the bake reads it next to the main TRB.
+          files=(
+            "$NLPP_VANILLA_IMG"
+            "$NLPP_VANILLA_CODE"
+            "$NLPP_VANILLA_TRB"
+            "$NLPP_VANILLA_RESIDENT_TRB"
+            "$(dirname "$NLPP_VANILLA_TRB")/textresource_config.trb"
+          )
+
+          {
+            echo "### Vanilla input SHA-256"
+            echo
+            echo "| File | Result | Actual | Expected |"
+            echo "|------|--------|--------|----------|"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          bad=()
+          for path in "${files[@]}"; do
+            name="$(basename "$path")"
+            expected="$(awk -v n="$name" '!/^#/ && $2 == n { print $1 }' gold/vanilla.sha256)"
+            if [ -z "$expected" ]; then
+              echo "::error::No expected hash for $name in vanilla.sha256"
+              bad+=("$name (no expected hash)")
+              continue
+            fi
+            if [ ! -f "$path" ]; then
+              echo "::error::MISSING vanilla file $name — expected at $path"
+              echo "| \`$name\` | ❌ missing | — | \`$expected\` |" >> "$GITHUB_STEP_SUMMARY"
+              bad+=("$name (missing)")
+              continue
+            fi
+            actual="$(sha256sum "$path" | cut -d' ' -f1)"
+            if [ "$actual" = "$expected" ]; then
+              result=OK
+              echo "| \`$name\` | ✅ match | \`$actual\` | \`$expected\` |" >> "$GITHUB_STEP_SUMMARY"
+            else
+              result=MISMATCH
+              echo "| \`$name\` | ❌ **MISMATCH** | \`$actual\` | \`$expected\` |" >> "$GITHUB_STEP_SUMMARY"
+              bad+=("$name")
+            fi
+            printf '%-9s %s\n          actual   %s\n          expected %s\n' \
+              "$result" "$path" "$actual" "$expected"
+          done
+
+          if [ "${#bad[@]}" -gt 0 ]; then
+            echo
+            echo "::error title=Vanilla files do not match::${#bad[@]} vanilla file(s) are NOT the expected unpatched originals: ${bad[*]}. Re-copy them from a fresh ROM extract (EngPatcher cache/vanilla_from_rom/) to the runner — see docs/TROUBLESHOOTING.md."
+            echo
+            echo "=================================================================="
+            echo " VANILLA CHECK FAILED — bake not started"
+            echo " Wrong or patched files: ${bad[*]}"
+            echo " Copy the unpatched originals to the runner and re-run."
+            echo "=================================================================="
+            exit 1
+          fi
+          echo "All ${#files[@]} vanilla files match vanilla.sha256"
 
       # Runs before the old Release is touched, so a failure leaves the last
       # good gold bake up for Drop. Missing/wrong vanilla fails instead of
