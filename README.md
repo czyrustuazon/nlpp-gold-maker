@@ -224,7 +224,7 @@ Copy the `github_pat_…` value — GitHub shows it once.
 |------|------|---------|
 | Secret | `ENGPATCHER_CHECKOUT_TOKEN` | Only if EngPatcher is private (contents:read) |
 | Secret | `NLPP_PROGRESS_ENDPOINT`, `NLPP_PROGRESS_TOKEN` | Companion-site progress bar; step is skipped if unset |
-| Secret | `DISCORD_WEBHOOK_URL` | Posts bake and smoke job status to Discord; steps skip if unset |
+| Secret | `DISCORD_WEBHOOK_URL` | Posts to Discord when a bake starts building, deletes the old Release, and finishes (success/failure/cancelled), plus smoke job status; steps skip if unset |
 | Variable | `NLPP_PACK_WORKERS` | PNG pack workers (default 2) |
 | Variable | `NLPP_ENGPATCHER_REPO` | Default `OWNER/NewLovePlusPlusEngPatcher` |
 | Variable | `NLPP_ENGPATCHER_REF` | Default `main` |

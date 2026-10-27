@@ -78,6 +78,46 @@ jobs:
       ENGPATCHER_REPO: ${{ vars.NLPP_ENGPATCHER_REPO || format('{0}/NewLovePlusPlusEngPatcher', github.repository_owner) }}
 
     steps:
+      # First step so the always() status post still has it if anything later fails.
+      # Usage: python3 "$RUNNER_TEMP/discord_notify.py" TITLE COLOR [key=value ...]
+      - name: Write Discord notifier
+        run: |
+          set -euo pipefail
+          cat > "$RUNNER_TEMP/discord_notify.py" <<'PY'
+          import json, os, sys, urllib.request
+
+          title, color, *fields = sys.argv[1:]
+          webhook = os.environ.get("WEBHOOK", "")
+          if not webhook:
+              print("DISCORD_WEBHOOK_URL unset — skipping")
+              sys.exit(0)
+          run_url = "{}/{}/actions/runs/{}".format(
+              os.environ["GITHUB_SERVER_URL"], os.environ["GITHUB_REPOSITORY"], os.environ["GITHUB_RUN_ID"]
+          )
+          lines = []
+          for field in fields:
+              key, _, value = field.partition("=")
+              lines.append(f"**{key}:** `{value}`")
+          lines.append(f"[View run]({run_url})")
+          body = {"embeds": [{"title": title, "color": int(color), "description": "\n".join(lines)}]}
+          req = urllib.request.Request(
+              webhook,
+              data=json.dumps(body).encode(),
+              # Discord (Cloudflare) 403s the default Python-urllib User-Agent.
+              headers={
+                  "Content-Type": "application/json",
+                  "User-Agent": "nlpp-gold-maker-ci (https://github.com/czyrustuazon/nlpp-gold-maker, 1.0)",
+              },
+              method="POST",
+          )
+          # Best effort: a Discord outage must not fail the bake.
+          try:
+              with urllib.request.urlopen(req, timeout=30) as resp:
+                  print(f"Discord HTTP {resp.status}")
+          except Exception as e:
+              print(f"::warning::Discord post failed: {e}")
+          PY
+
       # No actions/* — fetch this repo (for vanilla.sha256) and EngPatcher with plain git.
       - name: Resolve tag / EngPatcher ref / pack flags
         id: meta
@@ -296,6 +336,17 @@ jobs:
           } >> "$GITHUB_OUTPUT"
           echo "reuse mode=$MODE ($REASON)"
 
+      - name: "Discord: building"
+        if: steps.reuse.outputs.mode != 'current' && steps.net.outputs.online == 'true'
+        env:
+          WEBHOOK: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          TAG: ${{ steps.meta.outputs.tag }}
+          MODE: ${{ steps.reuse.outputs.mode }}
+          SHA: ${{ steps.reuse.outputs.sha }}
+        run: |
+          python3 "$RUNNER_TEMP/discord_notify.py" "🔨 Gold bake: building" 3447003 \
+            "tag=$TAG" "mode=$MODE" "engpatcher=${SHA:0:12}"
+
       # Ubuntu 23.04+ system Python refuses `pip install` (PEP 668), so use a venv.
       - name: Set up Python venv
         if: steps.reuse.outputs.mode != 'current'
@@ -456,6 +507,7 @@ jobs:
       # code_only adds name_input_code.bin onto the live Release. Deleting the
       # tag first would force Drop into a local pack while that file is built.
       - name: Delete the published gold bake this run will replace
+        id: delete
         if: steps.reuse.outputs.mode != 'current' && steps.reuse.outputs.mode != 'code_only' && steps.net.outputs.online == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
@@ -465,10 +517,20 @@ jobs:
           set -euo pipefail
           if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
             gh release delete "$TAG" --repo "$REPO" --yes --cleanup-tag
+            echo "deleted=true" >> "$GITHUB_OUTPUT"
             echo "Deleted Release $TAG. Drop will pack locally until this run publishes a new bake."
           else
             echo "No Release $TAG to delete."
           fi
+
+      - name: "Discord: release deleted"
+        if: steps.delete.outputs.deleted == 'true'
+        env:
+          WEBHOOK: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          TAG: ${{ steps.meta.outputs.tag }}
+        run: |
+          python3 "$RUNNER_TEMP/discord_notify.py" "🗑️ Gold bake: release deleted" 15844367 \
+            "tag=$TAG" "local builds=full pack until the new bake is published"
 
       - name: Rebuild gold bake
         if: steps.reuse.outputs.mode != 'current'
@@ -539,6 +601,7 @@ jobs:
           echo "No internet. Bake was not uploaded. It is engpatcher/release/bake_img.bin on this runner."
 
       - name: Publish GitHub Release
+        id: publish
         if: steps.reuse.outputs.mode != 'current' && steps.net.outputs.online == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
@@ -578,15 +641,17 @@ jobs:
         env:
           WEBHOOK: ${{ secrets.DISCORD_WEBHOOK_URL }}
           STATUS: ${{ job.status }}
-          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           TAG: ${{ steps.meta.outputs.tag }}
           MODE: ${{ steps.reuse.outputs.mode }}
           SHA: ${{ steps.reuse.outputs.sha }}
           ONLINE: ${{ steps.net.outputs.online }}
+          DELETED: ${{ steps.delete.outputs.deleted }}
+          PUBLISHED: ${{ steps.publish.outcome }}
         run: |
           set -euo pipefail
-          if [ -z "${WEBHOOK:-}" ]; then
-            echo "DISCORD_WEBHOOK_URL unset — skipping"
+          NOTIFY="$RUNNER_TEMP/discord_notify.py"
+          if [ ! -f "$NOTIFY" ]; then
+            echo "Discord notifier missing — skipping"
             exit 0
           fi
           case "$STATUS" in
@@ -595,42 +660,15 @@ jobs:
             cancelled) TITLE="⚠️ Gold bake: cancelled"; COLOR=15105570 ;;
             *) TITLE="ℹ️ Gold bake: $STATUS"; COLOR=9807270 ;;
           esac
-          export TITLE COLOR
-          export TAG="${TAG:-gold}"
-          export MODE="${MODE:-unknown}"
-          export ONLINE="${ONLINE:-unknown}"
-          export SHA_SHORT="${SHA:-unknown}"
-          SHA_SHORT="${SHA_SHORT:0:12}"
-          export SHA_SHORT
-          python3 -c '
-          import json, os, urllib.request
-          tag, mode, sha, online, run_url = (
-              os.environ["TAG"], os.environ["MODE"], os.environ["SHA_SHORT"],
-              os.environ["ONLINE"], os.environ["RUN_URL"],
-          )
-          body = {
-              "embeds": [{
-                  "title": os.environ["TITLE"],
-                  "color": int(os.environ["COLOR"]),
-                  "description": (
-                      f"**tag:** `{tag}`\n"
-                      f"**mode:** `{mode}`\n"
-                      f"**engpatcher:** `{sha}`\n"
-                      f"**online:** `{online}`\n"
-                      f"[View run]({run_url})"
-                  ),
-              }]
-          }
-          req = urllib.request.Request(
-              os.environ["WEBHOOK"],
-              data=json.dumps(body).encode(),
-              # Discord (Cloudflare) 403s the default Python-urllib User-Agent.
-              headers={
-                  "Content-Type": "application/json",
-                  "User-Agent": "nlpp-gold-maker-ci (https://github.com/czyrustuazon/nlpp-gold-maker, 1.0)",
-              },
-              method="POST",
-          )
-          with urllib.request.urlopen(req, timeout=30) as resp:
-              print(f"Discord HTTP {resp.status}")
-          '
+          if [ "$PUBLISHED" = "success" ]; then
+            RELEASE=published
+          elif [ "$DELETED" = "true" ]; then
+            RELEASE="deleted, not republished"
+          else
+            RELEASE=unchanged
+          fi
+          SHA="${SHA:-unknown}"
+          python3 "$NOTIFY" "$TITLE" "$COLOR" \
+            "tag=${TAG:-gold}" "mode=${MODE:-unknown}" "engpatcher=${SHA:0:12}" \
+            "online=${ONLINE:-unknown}" "release=$RELEASE"
+
