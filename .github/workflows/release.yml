@@ -329,12 +329,17 @@ jobs:
             REASON="Release ${TAG} matches ${HEAD} but is missing name_input_code.bin"
           fi
 
+          # PATCHER_RELEASE is the version on the in-game "Eng Patch" badge.
+          # Older EngPatcher refs have no patcher_version.py → "unknown".
+          VERSION=$(python3 -c 'import re,sys; m=re.search(r"^PATCHER_RELEASE\s*=\s*[\x27\"]([^\x27\"]+)", open(sys.argv[1], encoding="utf-8").read(), re.M); print(m.group(1) if m else "unknown")' engpatcher/src/patcher_version.py 2>/dev/null || echo unknown)
+
           {
             echo "mode=$MODE"
             echo "sha=$HEAD"
             echo "online=$ONLINE"
+            echo "version=$VERSION"
           } >> "$GITHUB_OUTPUT"
-          echo "reuse mode=$MODE ($REASON)"
+          echo "reuse mode=$MODE ($REASON) version=$VERSION"
 
       - name: "Discord: building"
         if: steps.reuse.outputs.mode != 'current' && steps.net.outputs.online == 'true'
@@ -343,9 +348,10 @@ jobs:
           TAG: ${{ steps.meta.outputs.tag }}
           MODE: ${{ steps.reuse.outputs.mode }}
           SHA: ${{ steps.reuse.outputs.sha }}
+          VERSION: ${{ steps.reuse.outputs.version }}
         run: |
           python3 "$RUNNER_TEMP/discord_notify.py" "🔨 Gold bake: building" 3447003 \
-            "tag=$TAG" "mode=$MODE" "engpatcher=${SHA:0:12}"
+            "tag=$TAG" "version=${VERSION:-unknown}" "mode=$MODE" "engpatcher=${SHA:0:12}"
 
       # Ubuntu 23.04+ system Python refuses `pip install` (PEP 668), so use a venv.
       - name: Set up Python venv
@@ -644,6 +650,7 @@ jobs:
           TAG: ${{ steps.meta.outputs.tag }}
           MODE: ${{ steps.reuse.outputs.mode }}
           SHA: ${{ steps.reuse.outputs.sha }}
+          VERSION: ${{ steps.reuse.outputs.version }}
           ONLINE: ${{ steps.net.outputs.online }}
           DELETED: ${{ steps.delete.outputs.deleted }}
           PUBLISHED: ${{ steps.publish.outcome }}
@@ -669,6 +676,6 @@ jobs:
           fi
           SHA="${SHA:-unknown}"
           python3 "$NOTIFY" "$TITLE" "$COLOR" \
-            "tag=${TAG:-gold}" "mode=${MODE:-unknown}" "engpatcher=${SHA:0:12}" \
+            "tag=${TAG:-gold}" "version=${VERSION:-unknown}" "mode=${MODE:-unknown}" "engpatcher=${SHA:0:12}" \
             "online=${ONLINE:-unknown}" "release=$RELEASE"
 
